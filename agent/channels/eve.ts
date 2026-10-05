@@ -4,6 +4,7 @@ import {
   localDev,
   routeAuth,
   UnauthenticatedError,
+  vercelOidc,
 } from "eve/channels/auth";
 import { z } from "zod";
 import { isSessionOwned } from "@db/services/sessions";
@@ -19,7 +20,9 @@ import {
   scheduledReportFromSession,
 } from "@agent/lib/schedules/report-lifecycle";
 
-const authenticateLocalDev = localDev();
+// Trusted infrastructure callers (the local dev server and Vercel OIDC tokens
+// from this project, such as `eve eval --url`) act as the browser benchmark user.
+const benchmarkAuthenticators = [vercelOidc(), localDev()];
 
 const authenticate: Parameters<typeof routeAuth>[1] = [
   async (request) => {
@@ -40,25 +43,27 @@ const authenticate: Parameters<typeof routeAuth>[1] = [
       principalType: "user",
     };
   },
-  async (request) => {
-    const local = await authenticateLocalDev(request);
-    if (!local) return null;
+  ...benchmarkAuthenticators.map(
+    (authenticateTrusted) => async (request: Request) => {
+      const trusted = await authenticateTrusted(request);
+      if (!trusted) return null;
 
-    const scope = accessScopeForUser("better-auth:browser-benchmark");
-    await requireOwnedRouteSubject(scope, request);
+      const scope = accessScopeForUser("better-auth:browser-benchmark");
+      await requireOwnedRouteSubject(scope, request);
 
-    return {
-      ...local,
-      attributes: {
-        ...local.attributes,
-        conversationChannel: "eve",
-        phoneNumber: "+15555550100",
-        workspaceId: scope.workspaceId,
-      },
-      principalId: scope.userId,
-      principalType: "user" as const,
-    };
-  },
+      return {
+        ...trusted,
+        attributes: {
+          ...trusted.attributes,
+          conversationChannel: "eve",
+          phoneNumber: "+15555550100",
+          workspaceId: scope.workspaceId,
+        },
+        principalId: scope.userId,
+        principalType: "user" as const,
+      };
+    }
+  ),
   () => {
     throw new UnauthenticatedError({
       code: "authentication_required",
